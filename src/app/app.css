@@ -93,6 +93,10 @@ svg {
 	stroke-width: 2;
 }
 
+:host ::ng-deep .nodes .expanded circle {
+	fill: #3a8f5b;
+}
+
 :host ::ng-deep .nodes text {
 	fill: var(--node-ink);
 	font-family: 'Courier New', monospace;

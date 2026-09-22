@@ -3,7 +3,7 @@ import { AfterViewInit, Component, ElementRef, OnDestroy, ViewChild, inject, sig
 import * as d3 from 'd3';
 import { Connection, Room } from './models';
 
-interface PositionedRoom extends Room {
+interface PositionedRoom extends Room, d3.SimulationNodeDatum {
   x: number;
   y: number;
 }
@@ -24,6 +24,12 @@ export class App implements OnDestroy {
 
   private readonly http = inject(HttpClient);
   private simulation?: d3.Simulation<PositionedRoom, undefined>;
+  private allRooms: Room[] = [];
+  private allConnections: Connection[] = [];
+  private readonly visibleRoomKeys = new Set(['04']);
+  private readonly visibleConnectionKeys = new Set<string>();
+  private readonly expandedRoomKeys = new Set<string>();
+  private readonly roomPositions = new Map<string, { x: number; y: number }>();
 
   ngAfterViewInit(): void {
     this.loadGraph();
@@ -44,7 +50,9 @@ export class App implements OnDestroy {
         throw new Error('Graph data was empty.');
       }
 
-      this.drawGraph(rooms, this.makeBidirectional(connections));
+      this.allRooms = rooms;
+      this.allConnections = this.makeBidirectional(connections);
+      this.renderVisibleGraph();
     } catch {
       this.errorMessage.set('The graph data could not be loaded.');
     } finally {
@@ -52,20 +60,27 @@ export class App implements OnDestroy {
     }
   }
 
-  private drawGraph(rooms: Room[], connections: Connection[]): void {
+  private renderVisibleGraph(): void {
+    this.simulation?.stop();
+
     const svg = d3.select(this.graphElement.nativeElement);
     const width = this.graphElement.nativeElement.clientWidth;
     const height = this.graphElement.nativeElement.clientHeight;
-    const positionedRooms: PositionedRoom[] = rooms.map((room) => ({
-      ...room,
-      x: 28 + Math.random() * Math.max(width - 56, 1),
-      y: 28 + Math.random() * Math.max(height - 56, 1),
-    }));
-    const links: GraphLink[] = connections.flatMap((connection) => {
-      const source = positionedRooms.find((room) => room.key === connection.from);
-      const target = positionedRooms.find((room) => room.key === connection.to);
-      return source && target ? [{ source: connection.from, target: connection.to }] : [];
-    });
+    const positionedRooms: PositionedRoom[] = this.allRooms
+      .filter((room) => this.visibleRoomKeys.has(room.key))
+      .map((room) => {
+        const position = this.roomPositions.get(room.key) ?? {
+          x: 28 + Math.random() * Math.max(width - 56, 1),
+          y: 28 + Math.random() * Math.max(height - 56, 1),
+        };
+        this.roomPositions.set(room.key, position);
+        return { ...room, ...position };
+      });
+    const visibleRoomKeys = new Set(positionedRooms.map((room) => room.key));
+    const links: GraphLink[] = this.allConnections
+      .filter((connection) => this.visibleConnectionKeys.has(this.connectionKey(connection)))
+      .filter((connection) => visibleRoomKeys.has(connection.from) && visibleRoomKeys.has(connection.to))
+      .map((connection) => ({ source: connection.from, target: connection.to }));
 
     svg.attr('viewBox', `0 0 ${width} ${height}`);
     svg.selectAll('*').remove();
@@ -80,10 +95,42 @@ export class App implements OnDestroy {
     const nodes = svg
       .append('g')
       .attr('class', 'nodes')
-      .selectAll('g')
+      .selectAll<SVGGElement, PositionedRoom>('g')
       .data(positionedRooms)
       .join('g')
       .attr('transform', (room) => `translate(${room.x}, ${room.y})`);
+
+    nodes
+      .classed('expanded', (room) => this.expandedRoomKeys.has(room.key))
+      .style('cursor', 'grab')
+      .on('click', (_, room) => this.revealConnections(room.key));
+
+    nodes
+      .call(
+        d3
+          .drag<SVGGElement, PositionedRoom>()
+          .on('start', (event, room) => {
+            if (!event.active) {
+              this.simulation?.alphaTarget(0.2).restart();
+            }
+            room.fx = room.x;
+            room.fy = room.y;
+            d3.select(event.sourceEvent.currentTarget as SVGGElement).style('cursor', 'grabbing');
+          })
+          .on('drag', (event, room) => {
+            room.fx = event.x;
+            room.fy = event.y;
+            this.roomPositions.set(room.key, { x: event.x, y: event.y });
+          })
+          .on('end', (event, room) => {
+            if (!event.active) {
+              this.simulation?.alphaTarget(0);
+            }
+            room.fx = null;
+            room.fy = null;
+            d3.select(event.sourceEvent.currentTarget as SVGGElement).style('cursor', 'grab');
+          }),
+      );
 
     nodes.append('circle').attr('r', 18);
     nodes
@@ -113,7 +160,33 @@ export class App implements OnDestroy {
           .attr('y2', (link) => (link.target as PositionedRoom).y);
 
         nodes.attr('transform', (room) => `translate(${room.x}, ${room.y})`);
+
+        for (const room of positionedRooms) {
+          this.roomPositions.set(room.key, { x: room.x, y: room.y });
+        }
       });
+  }
+
+  private revealConnections(roomKey: string): void {
+    if (this.expandedRoomKeys.has(roomKey)) {
+      return;
+    }
+
+    this.expandedRoomKeys.add(roomKey);
+
+    for (const connection of this.allConnections) {
+      if (connection.from === roomKey || connection.to === roomKey) {
+        this.visibleRoomKeys.add(connection.from);
+        this.visibleRoomKeys.add(connection.to);
+        this.visibleConnectionKeys.add(this.connectionKey(connection));
+      }
+    }
+
+    this.renderVisibleGraph();
+  }
+
+  private connectionKey(connection: Connection): string {
+    return `${connection.from}->${connection.to}`;
   }
 
   private makeBidirectional(connections: Connection[]): Connection[] {
